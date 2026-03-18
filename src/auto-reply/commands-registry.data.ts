@@ -31,6 +31,22 @@ let cachedNativeRegistry: ReturnType<typeof getActivePluginRegistry> | null = nu
 function buildChatCommands(): ChatCommandDefinition[] {
   const commands: ChatCommandDefinition[] = [
     ...buildBuiltinChatCommands(),
+    defineChatCommand({
+      key: "food-add",
+      description: "Add a food inventory batch: /추가 물품명 갯수 소비기한.",
+      textAlias: "/추가",
+      acceptsArgs: true,
+      scope: "text",
+      category: "management",
+    }),
+    defineChatCommand({
+      key: "food-remove",
+      description: "Remove food quantity (earliest expiry first): /제거 물품명 갯수.",
+      textAlias: "/제거",
+      acceptsArgs: true,
+      scope: "text",
+      category: "management",
+    }),
     ...listChannelPlugins()
       .filter(supportsNativeCommands)
       .map((plugin) => defineDockCommand(plugin)),

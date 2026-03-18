@@ -2632,6 +2632,57 @@ describe("handleCommands plugin commands", () => {
   });
 });
 
+describe("handleCommands food inventory commands", () => {
+  it("adds inventory and removes by earliest expiry first", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-food-state-"));
+    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    try {
+      const cfg = {
+        commands: { text: true },
+        channels: { whatsapp: { allowFrom: ["*"] } },
+      } as OpenClawConfig;
+
+      const addFirst = await handleCommands(buildParams("/추가 우유 2 2026-03-20", cfg));
+      expect(addFirst.shouldContinue).toBe(false);
+      expect(addFirst.reply?.text).toContain("추가 완료");
+
+      const addSecond = await handleCommands(buildParams("/추가 우유 3 2026-03-18", cfg));
+      expect(addSecond.shouldContinue).toBe(false);
+
+      const remove = await handleCommands(buildParams("/제거 우유 4", cfg));
+      expect(remove.shouldContinue).toBe(false);
+      expect(remove.reply?.text).toContain("2026-03-18 3개");
+      expect(remove.reply?.text).toContain("2026-03-20 1개");
+      expect(remove.reply?.text).toContain("현재 수량: 1개");
+
+      const inventoryPath = path.join(stateDir, "food", "inventory.json");
+      const inventory = await readJsonFile<{
+        items: Record<string, { name: string; batches: Array<{ expiresOn: string; quantity: number }> }>;
+      }>(inventoryPath);
+      expect(inventory.items["우유"]?.batches).toEqual([{ expiresOn: "2026-03-20", quantity: 1 }]);
+    } finally {
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
+      await fs.rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns usage error when food command format is invalid", async () => {
+    const cfg = {
+      commands: { text: true },
+      channels: { whatsapp: { allowFrom: ["*"] } },
+    } as OpenClawConfig;
+
+    const result = await handleCommands(buildParams("/추가 우유 둘 내일", cfg));
+    expect(result.shouldContinue).toBe(false);
+    expect(result.reply?.text).toContain("형식 오류");
+  });
+});
+
 describe("handleCommands identity", () => {
   it("returns sender details for /whoami", async () => {
     const cfg = {
