@@ -47,6 +47,30 @@ function buildChatCommands(): ChatCommandDefinition[] {
       scope: "text",
       category: "management",
     }),
+    defineChatCommand({
+      key: "gifticon",
+      description: "Manage gifticons: /기프티콘, /기프티콘 추가, /기프티콘 제거.",
+      textAlias: "/기프티콘",
+      acceptsArgs: true,
+      scope: "text",
+      category: "management",
+    }),
+    defineChatCommand({
+      key: "item-location",
+      description: "Manage item locations: /물품, /물품 추가, /물품 제거.",
+      textAlias: "/물품",
+      acceptsArgs: true,
+      scope: "text",
+      category: "management",
+    }),
+    defineChatCommand({
+      key: "manual",
+      description: "Manage manuals from PDFs: /매뉴얼 등록, /매뉴얼 목록.",
+      textAlias: "/매뉴얼",
+      acceptsArgs: true,
+      scope: "text",
+      category: "management",
+    }),
     ...listChannelPlugins()
       .filter(supportsNativeCommands)
       .map((plugin) => defineDockCommand(plugin)),

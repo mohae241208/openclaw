@@ -1,6 +1,6 @@
 import { logVerbose } from "../../globals.js";
 import type { CommandHandler } from "./commands-types.js";
-import { normalizeFoodInventoryName, updateFoodInventory } from "./food-inventory-store.js";
+import { addFoodInventoryBatch, removeFoodInventoryQuantity } from "./food-inventory-store.js";
 
 const ADD_COMMAND = "/추가";
 const REMOVE_COMMAND = "/제거";
@@ -122,20 +122,10 @@ export const handleFoodCommands: CommandHandler = async (params, allowTextComman
 
   const parsedAdd = parseAddCommand(normalized);
   if (parsedAdd) {
-    const result = await updateFoodInventory((inventory) => {
-      const key = normalizeFoodInventoryName(parsedAdd.name);
-      const item = inventory.items[key] ?? { name: parsedAdd.name, batches: [] };
-      item.name = parsedAdd.name;
-      const existingBatch = item.batches.find((entry) => entry.expiresOn === parsedAdd.expiresOn);
-      if (existingBatch) {
-        existingBatch.quantity += parsedAdd.quantity;
-      } else {
-        item.batches.push({ expiresOn: parsedAdd.expiresOn, quantity: parsedAdd.quantity });
-      }
-      item.batches.sort((a, b) => a.expiresOn.localeCompare(b.expiresOn));
-      inventory.items[key] = item;
-      const total = item.batches.reduce((sum, batch) => sum + batch.quantity, 0);
-      return { total };
+    const result = await addFoodInventoryBatch({
+      name: parsedAdd.name,
+      quantity: parsedAdd.quantity,
+      expiresOn: parsedAdd.expiresOn,
     });
     return {
       shouldContinue: false,
@@ -147,53 +137,9 @@ export const handleFoodCommands: CommandHandler = async (params, allowTextComman
 
   const parsedRemove = parseRemoveCommand(normalized);
   if (parsedRemove) {
-    const result = await updateFoodInventory((inventory) => {
-      const key = normalizeFoodInventoryName(parsedRemove.name);
-      const item = inventory.items[key];
-      if (!item) {
-        return { ok: false as const, message: "⚠️ 해당 물품이 재고에 없습니다." };
-      }
-
-      const total = item.batches.reduce((sum, batch) => sum + batch.quantity, 0);
-      if (total < parsedRemove.quantity) {
-        return {
-          ok: false as const,
-          message: `⚠️ 재고가 부족합니다. 현재 ${item.name} 재고는 ${total}개입니다.`,
-        };
-      }
-
-      item.batches.sort((a, b) => a.expiresOn.localeCompare(b.expiresOn));
-      let remainingToRemove = parsedRemove.quantity;
-      const removedByExpiry: Array<{ expiresOn: string; quantity: number }> = [];
-      for (const batch of item.batches) {
-        if (remainingToRemove <= 0) {
-          break;
-        }
-        const removed = Math.min(batch.quantity, remainingToRemove);
-        if (removed > 0) {
-          batch.quantity -= removed;
-          remainingToRemove -= removed;
-          removedByExpiry.push({ expiresOn: batch.expiresOn, quantity: removed });
-        }
-      }
-      item.batches = item.batches.filter((batch) => batch.quantity > 0);
-      if (item.batches.length === 0) {
-        delete inventory.items[key];
-        return {
-          ok: true as const,
-          removedByExpiry,
-          remaining: 0,
-          itemName: item.name,
-        };
-      }
-      const remaining = item.batches.reduce((sum, batch) => sum + batch.quantity, 0);
-      inventory.items[key] = item;
-      return {
-        ok: true as const,
-        removedByExpiry,
-        remaining,
-        itemName: item.name,
-      };
+    const result = await removeFoodInventoryQuantity({
+      name: parsedRemove.name,
+      quantity: parsedRemove.quantity,
     });
 
     if (!result.ok) {

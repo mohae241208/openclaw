@@ -259,6 +259,11 @@ vi.mock("../../gateway/call.js", () => ({
   callGateway: callGatewayMock,
 }));
 
+const extractPdfContentMock = vi.hoisted(() => vi.fn());
+vi.mock("../../media/pdf-extract.js", () => ({
+  extractPdfContent: extractPdfContentMock,
+}));
+
 import type { HandleCommandsParams } from "./commands-types.js";
 
 // Avoid expensive workspace scans during /context tests.
@@ -286,6 +291,13 @@ const { abortEmbeddedPiRun, compactEmbeddedPiSession } =
 const { __testing: subagentControlTesting } = await import("../../agents/subagent-control.js");
 const { resetBashChatCommandForTests } = await import("./bash-command.js");
 const { handleCompactCommand } = await import("./commands-compact.js");
+const { buildCommandsPaginationKeyboard } = await import("./commands-info.js");
+const { normalizeFoodInventoryName, resolveFoodInventoryItemPath } =
+  await import("./food-inventory-store.js");
+const { normalizeGifticonPlaceName, resolveGifticonItemPath } = await import("./gifticon-store.js");
+const { normalizeItemLocationName, resolveItemLocationPath } =
+  await import("./item-location-store.js");
+const { resolveManualIndexPath } = await import("./manual-store.js");
 const { extractMessageText } = await import("./commands-subagents.js");
 const { buildCommandTestParams } = await import("./commands.test-harness.js");
 const { parseConfigCommand } = await import("./config-commands.js");
@@ -637,6 +649,11 @@ beforeEach(() => {
   readChannelAllowFromStoreMock.mockResolvedValue([]);
   addChannelAllowFromStoreEntryMock.mockResolvedValue({ changed: true, allowFrom: [] });
   removeChannelAllowFromStoreEntryMock.mockResolvedValue({ changed: true, allowFrom: [] });
+  extractPdfContentMock.mockReset();
+  extractPdfContentMock.mockResolvedValue({
+    text: "환불 규정: 유효기간 내 사용 가능",
+    images: [],
+  });
 });
 
 async function withTempConfigPath<T>(
@@ -2656,11 +2673,15 @@ describe("handleCommands food inventory commands", () => {
       expect(remove.reply?.text).toContain("2026-03-20 1개");
       expect(remove.reply?.text).toContain("현재 수량: 1개");
 
-      const inventoryPath = path.join(stateDir, "food", "inventory.json");
-      const inventory = await readJsonFile<{
-        items: Record<string, { name: string; batches: Array<{ expiresOn: string; quantity: number }> }>;
+      const inventoryPath = resolveFoodInventoryItemPath(
+        normalizeFoodInventoryName("우유"),
+        process.env,
+      );
+      const inventoryItem = await readJsonFile<{
+        name: string;
+        batches: Array<{ expiresOn: string; quantity: number }>;
       }>(inventoryPath);
-      expect(inventory.items["우유"]?.batches).toEqual([{ expiresOn: "2026-03-20", quantity: 1 }]);
+      expect(inventoryItem.batches).toEqual([{ expiresOn: "2026-03-20", quantity: 1 }]);
     } finally {
       if (previousStateDir === undefined) {
         delete process.env.OPENCLAW_STATE_DIR;
@@ -2680,6 +2701,223 @@ describe("handleCommands food inventory commands", () => {
     const result = await handleCommands(buildParams("/추가 우유 둘 내일", cfg));
     expect(result.shouldContinue).toBe(false);
     expect(result.reply?.text).toContain("형식 오류");
+  });
+});
+
+describe("handleCommands gifticon commands", () => {
+  it("adds, lists, and removes gifticons by earliest expiry first", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-gifticon-state-"));
+    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    try {
+      const cfg = {
+        commands: { text: true },
+        channels: { whatsapp: { allowFrom: ["*"] } },
+      } as OpenClawConfig;
+
+      const addFirst = await handleCommands(buildParams("/기프티콘 추가 스타벅스 2026-03-20", cfg));
+      expect(addFirst.shouldContinue).toBe(false);
+      expect(addFirst.reply?.text).toContain("기프티콘 추가 완료");
+
+      const addSecond = await handleCommands(
+        buildParams("/기프티콘 추가 스타벅스 2026-03-18", cfg),
+      );
+      expect(addSecond.shouldContinue).toBe(false);
+
+      const list = await handleCommands(buildParams("/기프티콘", cfg));
+      expect(list.shouldContinue).toBe(false);
+      expect(list.reply?.text).toContain("스타벅스");
+      expect(list.reply?.text).toContain("2026-03-18(1)");
+      expect(list.reply?.text).toContain("2026-03-20(1)");
+
+      const remove = await handleCommands(buildParams("/기프티콘 제거 스타벅스", cfg));
+      expect(remove.shouldContinue).toBe(false);
+      expect(remove.reply?.text).toContain("차감 기한: 2026-03-18");
+      expect(remove.reply?.text).toContain("현재 수량: 1개");
+
+      const itemPath = resolveGifticonItemPath(normalizeGifticonPlaceName("스타벅스"), process.env);
+      const item = await readJsonFile<{
+        place: string;
+        batches: Array<{ expiresOn: string; quantity: number }>;
+      }>(itemPath);
+      expect(item.batches).toEqual([{ expiresOn: "2026-03-20", quantity: 1 }]);
+    } finally {
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
+      await fs.rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns usage error when gifticon command format is invalid", async () => {
+    const cfg = {
+      commands: { text: true },
+      channels: { whatsapp: { allowFrom: ["*"] } },
+    } as OpenClawConfig;
+
+    const result = await handleCommands(buildParams("/기프티콘 추가 스타벅스 내일", cfg));
+    expect(result.shouldContinue).toBe(false);
+    expect(result.reply?.text).toContain("형식 오류");
+  });
+});
+
+describe("handleCommands item-location commands", () => {
+  it("adds, lists, and removes item locations", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-item-location-state-"));
+    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    try {
+      const cfg = {
+        commands: { text: true },
+        channels: { whatsapp: { allowFrom: ["*"] } },
+      } as OpenClawConfig;
+
+      const add = await handleCommands(buildParams("/물품 추가 세제 다용도실 선반", cfg));
+      expect(add.shouldContinue).toBe(false);
+      expect(add.reply?.text).toContain("물품 저장 완료");
+
+      const list = await handleCommands(buildParams("/물품", cfg));
+      expect(list.shouldContinue).toBe(false);
+      expect(list.reply?.text).toContain("세제");
+      expect(list.reply?.text).toContain("다용도실 선반");
+
+      const storedPath = resolveItemLocationPath(normalizeItemLocationName("세제"), process.env);
+      const stored = await readJsonFile<{ item: string; location: string }>(storedPath);
+      expect(stored.item).toBe("세제");
+      expect(stored.location).toBe("다용도실 선반");
+
+      const remove = await handleCommands(buildParams("/물품 제거 세제", cfg));
+      expect(remove.shouldContinue).toBe(false);
+      expect(remove.reply?.text).toContain("물품 제거 완료");
+
+      const listAfterRemove = await handleCommands(buildParams("/물품", cfg));
+      expect(listAfterRemove.shouldContinue).toBe(false);
+      expect(listAfterRemove.reply?.text).toContain("등록된 물품 위치가 없습니다");
+    } finally {
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
+      await fs.rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns usage error when item-location command format is invalid", async () => {
+    const cfg = {
+      commands: { text: true },
+      channels: { whatsapp: { allowFrom: ["*"] } },
+    } as OpenClawConfig;
+
+    const result = await handleCommands(buildParams("/물품 추가 세제", cfg));
+    expect(result.shouldContinue).toBe(false);
+    expect(result.reply?.text).toContain("형식 오류");
+  });
+});
+
+describe("handleCommands manual commands", () => {
+  it("registers PDF manual into data/manual and lists it", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-manual-state-"));
+    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    try {
+      const cfg = {
+        commands: { text: true },
+        channels: { whatsapp: { allowFrom: ["*"] } },
+      } as OpenClawConfig;
+      const mediaDir = path.join(testWorkspaceDir, "media", "inbound");
+      await fs.mkdir(mediaDir, { recursive: true });
+      const pdfPath = path.join(mediaDir, "refund-guide.pdf");
+      await fs.writeFile(pdfPath, Buffer.from("fake-pdf"));
+
+      const register = await handleCommands(
+        buildParams("/매뉴얼 등록", cfg, {
+          MediaPath: pdfPath,
+          MediaType: "application/pdf",
+        }),
+      );
+      expect(register.shouldContinue).toBe(false);
+      expect(register.reply?.text).toContain("매뉴얼 등록 완료");
+
+      const indexPath = resolveManualIndexPath(process.env);
+      const index = await readJsonFile<{
+        manuals: Array<{
+          sourceFileName: string;
+          pdfRelativePath: string;
+          markdownRelativePath: string;
+        }>;
+      }>(indexPath);
+      expect(index.manuals.length).toBe(1);
+      expect(index.manuals[0]?.sourceFileName).toBe("refund-guide.pdf");
+      expect(
+        await fs
+          .stat(
+            path.join(stateDir, "data", "manual", index.manuals[0]?.pdfRelativePath ?? "missing"),
+          )
+          .then(() => true)
+          .catch(() => false),
+      ).toBe(true);
+      expect(
+        await fs
+          .stat(
+            path.join(
+              stateDir,
+              "data",
+              "manual",
+              index.manuals[0]?.markdownRelativePath ?? "missing",
+            ),
+          )
+          .then(() => true)
+          .catch(() => false),
+      ).toBe(true);
+
+      const listed = await handleCommands(buildParams("/매뉴얼 목록", cfg));
+      expect(listed.shouldContinue).toBe(false);
+      expect(listed.reply?.text).toContain("refund-guide");
+    } finally {
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
+      await fs.rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("auto-registers attached PDF when no slash command is provided", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-manual-auto-state-"));
+    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    try {
+      const cfg = {
+        commands: { text: true },
+        channels: { whatsapp: { allowFrom: ["*"] } },
+      } as OpenClawConfig;
+      const mediaDir = path.join(testWorkspaceDir, "media", "inbound");
+      await fs.mkdir(mediaDir, { recursive: true });
+      const pdfPath = path.join(mediaDir, "auto-manual.pdf");
+      await fs.writeFile(pdfPath, Buffer.from("fake-pdf-auto"));
+
+      const autoRegister = await handleCommands(
+        buildParams("", cfg, {
+          Body: "",
+          CommandBody: "",
+          MediaPath: pdfPath,
+          MediaType: "application/pdf",
+        }),
+      );
+      expect(autoRegister.shouldContinue).toBe(false);
+      expect(autoRegister.reply?.text).toContain("매뉴얼 등록 완료");
+    } finally {
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
+      await fs.rm(stateDir, { recursive: true, force: true });
+    }
   });
 });
 
