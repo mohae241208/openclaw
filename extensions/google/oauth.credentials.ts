@@ -115,13 +115,13 @@ function resolveGeminiCliSearchDirs(candidate: string): string[] {
 }
 
 function resolvePnpmGlobalGeminiDirs(): string[] {
-  const home = homedir();
+  const homes = resolveHomeDirs();
   const pnpmRoots = [
     process.env.OPENCLAW_PNPM_GLOBAL_DIR?.trim(),
     process.env.PNPM_HOME?.trim() ? join(process.env.PNPM_HOME.trim(), "global") : "",
     process.env.PNPM_HOME?.trim() ? join(dirname(process.env.PNPM_HOME.trim()), "global") : "",
-    home ? join(home, ".local", "share", "pnpm", "global") : "",
-    home ? join(home, "Library", "pnpm", "global") : "",
+    ...homes.map((home) => join(home, ".local", "share", "pnpm", "global")),
+    ...homes.map((home) => join(home, "Library", "pnpm", "global")),
   ].filter(Boolean) as string[];
 
   const out: string[] = [];
@@ -160,19 +160,75 @@ function looksLikeGeminiCliDir(candidate: string): boolean {
   );
 }
 
+function resolveHomeDirs(): string[] {
+  const users = [
+    process.env.USER?.trim(),
+    process.env.LOGNAME?.trim(),
+    process.env.SUDO_USER?.trim(),
+  ].filter(Boolean) as string[];
+  const homeCandidates = [
+    homedir(),
+    process.env.HOME?.trim(),
+    process.env.USERPROFILE?.trim(),
+    ...users.map((user) => join("/home", user)),
+    ...users.map((user) => join("/Users", user)),
+  ].filter(Boolean) as string[];
+
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+  for (const candidate of homeCandidates) {
+    const key =
+      process.platform === "win32" ? candidate.replace(/\\/g, "/").toLowerCase() : candidate;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push(candidate);
+  }
+  return deduped;
+}
+
+function resolveGlobalNvmRoots(): string[] {
+  const roots: string[] = [];
+  const homeRoots = resolveHomeDirs().map((home) => join(home, ".nvm"));
+  roots.push(...homeRoots);
+  for (const parent of ["/home", "/Users"]) {
+    try {
+      for (const entry of credentialFs.readdirSync(parent, { withFileTypes: true })) {
+        if (!entry.isDirectory()) {
+          continue;
+        }
+        roots.push(join(parent, entry.name, ".nvm"));
+      }
+    } catch {
+      // ignore inaccessible user-home parents
+    }
+  }
+  return roots;
+}
+
 function resolveNvmBinDirs(): string[] {
-  const home = homedir();
-  const nvmRoots = [process.env.NVM_DIR?.trim(), home ? join(home, ".nvm") : ""].filter(
+  const nvmRoots = [process.env.NVM_DIR?.trim(), ...resolveGlobalNvmRoots()].filter(
     Boolean,
   ) as string[];
   const bins: string[] = [];
+  const seen = new Set<string>();
+  const pushBin = (candidate: string) => {
+    const key =
+      process.platform === "win32" ? candidate.replace(/\\/g, "/").toLowerCase() : candidate;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    bins.push(candidate);
+  };
   const pushVersionBins = (versionsRoot: string) => {
     try {
       for (const entry of credentialFs.readdirSync(versionsRoot, { withFileTypes: true })) {
         if (!entry.isDirectory()) {
           continue;
         }
-        bins.push(join(versionsRoot, entry.name, "bin"));
+        pushBin(join(versionsRoot, entry.name, "bin"));
       }
     } catch {
       // ignore inaccessible nvm roots
@@ -188,17 +244,23 @@ function resolveNvmBinDirs(): string[] {
 
 function resolveBinarySearchDirs(): string[] {
   const fromPath = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
-  const home = homedir();
+  const homes = resolveHomeDirs();
+  const geminiBinEnv = process.env.OPENCLAW_GEMINI_CLI_BIN?.trim();
+  const geminiBinDir = geminiBinEnv
+    ? /(^|[\\/])gemini(-cli)?(\.(cmd|bat|exe))?$/i.test(geminiBinEnv)
+      ? dirname(geminiBinEnv)
+      : geminiBinEnv
+    : "";
   const envDirs = [
-    process.env.OPENCLAW_GEMINI_CLI_BIN?.trim(),
+    geminiBinDir,
     process.env.PNPM_HOME?.trim(),
     process.env.npm_config_prefix?.trim() ? join(process.env.npm_config_prefix.trim(), "bin") : "",
     process.env.NPM_CONFIG_PREFIX?.trim() ? join(process.env.NPM_CONFIG_PREFIX.trim(), "bin") : "",
     process.env.VOLTA_HOME?.trim() ? join(process.env.VOLTA_HOME.trim(), "bin") : "",
     process.env.NVM_BIN?.trim(),
     process.env.HOMEBREW_PREFIX?.trim() ? join(process.env.HOMEBREW_PREFIX.trim(), "bin") : "",
-    home ? join(home, ".npm-global", "bin") : "",
-    home ? join(home, ".local", "bin") : "",
+    ...homes.map((home) => join(home, ".npm-global", "bin")),
+    ...homes.map((home) => join(home, ".local", "bin")),
     ...resolveNvmBinDirs(),
   ].filter(Boolean) as string[];
   const commonDirs =
@@ -233,6 +295,17 @@ function findInPath(name: string): string | null {
 }
 
 function findFirstInPath(names: string[]): string | null {
+  const explicitBinaryPath = process.env.OPENCLAW_GEMINI_CLI_PATH?.trim();
+  if (explicitBinaryPath && credentialFs.existsSync(explicitBinaryPath)) {
+    const normalized = explicitBinaryPath.replace(/\\/g, "/").toLowerCase();
+    const basename = normalized.slice(normalized.lastIndexOf("/") + 1);
+    const isExpectedBinary = names.some(
+      (name) => basename === name || basename.startsWith(`${name}.`),
+    );
+    if (isExpectedBinary) {
+      return explicitBinaryPath;
+    }
+  }
   for (const name of names) {
     const found = findInPath(name);
     if (found) {
@@ -342,6 +415,6 @@ export function resolveOAuthClientConfig(): { clientId: string; clientSecret?: s
   }
 
   throw new Error(
-    "Gemini CLI not found. Install it first: brew install gemini-cli (or npm install -g @google/gemini-cli), or set GEMINI_CLI_OAUTH_CLIENT_ID.",
+    "Gemini CLI not found. Install it first: brew install gemini-cli (or npm install -g @google/gemini-cli), or set OPENCLAW_GEMINI_CLI_PATH=/path/to/gemini, or set GEMINI_CLI_OAUTH_CLIENT_ID.",
   );
 }
