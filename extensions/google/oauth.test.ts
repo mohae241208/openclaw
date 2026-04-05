@@ -356,7 +356,15 @@ describe("extractGeminiCliCredentials", () => {
         "dist",
         "index.js",
       );
-      const geminiCliDir = join(rootDir, "usr", "local", "lib", "node_modules", "@google", "gemini-cli");
+      const geminiCliDir = join(
+        rootDir,
+        "usr",
+        "local",
+        "lib",
+        "node_modules",
+        "@google",
+        "gemini-cli",
+      );
       const packageJsonPath = normalizePath(join(geminiCliDir, "package.json"));
       const oauth2Path = join(
         geminiCliDir,
@@ -388,6 +396,56 @@ describe("extractGeminiCliCredentials", () => {
         delete process.env.npm_config_prefix;
       } else {
         process.env.npm_config_prefix = originalNpmPrefix;
+      }
+    }
+  });
+
+  it("extracts credentials from pnpm global node_modules when PATH misses gemini", async () => {
+    const originalPnpmHome = process.env.PNPM_HOME;
+    const pnpmHome = join(rootDir, "home", "ubuntu", ".local", "share", "pnpm");
+    const pnpmGlobalRoot = join(pnpmHome, "global");
+    const geminiCliDir = join(pnpmGlobalRoot, "5", "node_modules", "@google", "gemini-cli");
+    const packageJsonPath = normalizePath(join(geminiCliDir, "package.json"));
+    const oauth2Path = join(
+      geminiCliDir,
+      "node_modules",
+      "@google",
+      "gemini-cli-core",
+      "dist",
+      "src",
+      "code_assist",
+      "oauth2.js",
+    );
+
+    try {
+      process.env.PATH = join(rootDir, "usr", "bin");
+      process.env.PNPM_HOME = pnpmHome;
+      mockExistsSync.mockImplementation((p: string) => {
+        const normalized = normalizePath(p);
+        return normalized === packageJsonPath || normalized === normalizePath(oauth2Path);
+      });
+      mockReaddirSync.mockImplementation((p: string) => {
+        const normalized = normalizePath(p);
+        if (normalized === normalizePath(pnpmGlobalRoot)) {
+          return [dirent("5", true)];
+        }
+        return [];
+      });
+      mockReadFileSync.mockImplementation((p: string) => {
+        if (normalizePath(p) === normalizePath(oauth2Path)) {
+          return FAKE_OAUTH2_CONTENT;
+        }
+        throw new Error(`Unexpected read for ${p}`);
+      });
+
+      clearCredentialsCache();
+      const result = extractGeminiCliCredentials();
+      expectFakeCliCredentials(result);
+    } finally {
+      if (originalPnpmHome === undefined) {
+        delete process.env.PNPM_HOME;
+      } else {
+        process.env.PNPM_HOME = originalPnpmHome;
       }
     }
   });

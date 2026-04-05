@@ -49,14 +49,17 @@ export function extractGeminiCliCredentials(): { clientId: string; clientSecret:
   }
 
   try {
+    const geminiCliDirs: string[] = [];
     const geminiPath = findFirstInPath(["gemini", "gemini-cli"]);
-    if (!geminiPath) {
+    if (geminiPath) {
+      const resolvedPath = credentialFs.realpathSync(geminiPath);
+      geminiCliDirs.push(...resolveGeminiCliDirs(geminiPath, resolvedPath));
+    }
+    geminiCliDirs.push(...resolvePnpmGlobalGeminiDirs());
+
+    if (geminiCliDirs.length === 0) {
       return null;
     }
-
-    const resolvedPath = credentialFs.realpathSync(geminiPath);
-    const geminiCliDirs = resolveGeminiCliDirs(geminiPath, resolvedPath);
-
     for (const geminiCliDir of geminiCliDirs) {
       const directCredentials = readGeminiCliCredentialsFromKnownPaths(geminiCliDir);
       if (directCredentials) {
@@ -111,6 +114,45 @@ function resolveGeminiCliSearchDirs(candidate: string): string[] {
   return searchDirs.filter(looksLikeGeminiCliDir);
 }
 
+function resolvePnpmGlobalGeminiDirs(): string[] {
+  const home = homedir();
+  const pnpmRoots = [
+    process.env.OPENCLAW_PNPM_GLOBAL_DIR?.trim(),
+    process.env.PNPM_HOME?.trim() ? join(process.env.PNPM_HOME.trim(), "global") : "",
+    process.env.PNPM_HOME?.trim() ? join(dirname(process.env.PNPM_HOME.trim()), "global") : "",
+    home ? join(home, ".local", "share", "pnpm", "global") : "",
+    home ? join(home, "Library", "pnpm", "global") : "",
+  ].filter(Boolean) as string[];
+
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const pushUnique = (candidate: string) => {
+    const key =
+      process.platform === "win32" ? candidate.replace(/\\/g, "/").toLowerCase() : candidate;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    out.push(candidate);
+  };
+
+  for (const root of pnpmRoots) {
+    pushUnique(join(root, "node_modules", "@google", "gemini-cli"));
+    try {
+      for (const entry of credentialFs.readdirSync(root, { withFileTypes: true })) {
+        if (!entry.isDirectory()) {
+          continue;
+        }
+        pushUnique(join(root, entry.name, "node_modules", "@google", "gemini-cli"));
+      }
+    } catch {
+      // ignore missing or inaccessible pnpm global dirs
+    }
+  }
+
+  return out.filter(looksLikeGeminiCliDir);
+}
+
 function looksLikeGeminiCliDir(candidate: string): boolean {
   return (
     credentialFs.existsSync(join(candidate, "package.json")) ||
@@ -120,10 +162,9 @@ function looksLikeGeminiCliDir(candidate: string): boolean {
 
 function resolveNvmBinDirs(): string[] {
   const home = homedir();
-  const nvmRoots = [
-    process.env.NVM_DIR?.trim(),
-    home ? join(home, ".nvm") : "",
-  ].filter(Boolean) as string[];
+  const nvmRoots = [process.env.NVM_DIR?.trim(), home ? join(home, ".nvm") : ""].filter(
+    Boolean,
+  ) as string[];
   const bins: string[] = [];
   const pushVersionBins = (versionsRoot: string) => {
     try {
