@@ -339,6 +339,102 @@ describe("extractGeminiCliCredentials", () => {
     expectFakeCliCredentials(result);
   });
 
+  it("extracts credentials when npm global prefix is set but PATH misses gemini", async () => {
+    const originalNpmPrefix = process.env.npm_config_prefix;
+    try {
+      process.env.PATH = join(rootDir, "usr", "bin");
+      process.env.npm_config_prefix = join(rootDir, "usr", "local");
+      const geminiPath = join(rootDir, "usr", "local", "bin", "gemini");
+      const resolvedPath = join(
+        rootDir,
+        "usr",
+        "local",
+        "lib",
+        "node_modules",
+        "@google",
+        "gemini-cli",
+        "dist",
+        "index.js",
+      );
+      const geminiCliDir = join(rootDir, "usr", "local", "lib", "node_modules", "@google", "gemini-cli");
+      const packageJsonPath = normalizePath(join(geminiCliDir, "package.json"));
+      const oauth2Path = join(
+        geminiCliDir,
+        "node_modules",
+        "@google",
+        "gemini-cli-core",
+        "dist",
+        "src",
+        "code_assist",
+        "oauth2.js",
+      );
+
+      mockExistsSync.mockImplementation((p: string) => {
+        const normalized = normalizePath(p);
+        return (
+          normalized === normalizePath(geminiPath) ||
+          normalized === packageJsonPath ||
+          normalized === normalizePath(oauth2Path)
+        );
+      });
+      mockRealpathSync.mockReturnValue(resolvedPath);
+      mockReadFileSync.mockReturnValue(FAKE_OAUTH2_CONTENT);
+
+      clearCredentialsCache();
+      const result = extractGeminiCliCredentials();
+      expectFakeCliCredentials(result);
+    } finally {
+      if (originalNpmPrefix === undefined) {
+        delete process.env.npm_config_prefix;
+      } else {
+        process.env.npm_config_prefix = originalNpmPrefix;
+      }
+    }
+  });
+
+  it("extracts credentials when binary name is gemini-cli", async () => {
+    const binDir = join(rootDir, "fake", "gemini-cli-bin");
+    const geminiCliBinPath = join(binDir, "gemini-cli");
+    const resolvedPath = join(
+      rootDir,
+      "fake",
+      "lib",
+      "node_modules",
+      "@google",
+      "gemini-cli",
+      "dist",
+      "index.js",
+    );
+    const geminiCliDir = join(rootDir, "fake", "lib", "node_modules", "@google", "gemini-cli");
+    const packageJsonPath = normalizePath(join(geminiCliDir, "package.json"));
+    const oauth2Path = join(
+      geminiCliDir,
+      "node_modules",
+      "@google",
+      "gemini-cli-core",
+      "dist",
+      "src",
+      "code_assist",
+      "oauth2.js",
+    );
+
+    process.env.PATH = binDir;
+    mockExistsSync.mockImplementation((p: string) => {
+      const normalized = normalizePath(p);
+      return (
+        normalized === normalizePath(geminiCliBinPath) ||
+        normalized === packageJsonPath ||
+        normalized === normalizePath(oauth2Path)
+      );
+    });
+    mockRealpathSync.mockReturnValue(resolvedPath);
+    mockReadFileSync.mockReturnValue(FAKE_OAUTH2_CONTENT);
+
+    clearCredentialsCache();
+    const result = extractGeminiCliCredentials();
+    expectFakeCliCredentials(result);
+  });
+
   it("extracts credentials from Homebrew libexec installs", async () => {
     installHomebrewLibexecLayout({ oauth2Content: FAKE_OAUTH2_CONTENT });
 
@@ -346,6 +442,65 @@ describe("extractGeminiCliCredentials", () => {
     const result = extractGeminiCliCredentials();
 
     expectFakeCliCredentials(result);
+  });
+
+  it("extracts credentials from nvm versions when PATH does not include gemini", async () => {
+    const originalNvmDir = process.env.NVM_DIR;
+    const nvmDir = join(rootDir, "home", "ubuntu", ".nvm");
+    const versionDir = join(nvmDir, "versions", "node", "v25.9.0");
+    const geminiPath = join(versionDir, "bin", "gemini");
+    const resolvedPath = join(
+      versionDir,
+      "lib",
+      "node_modules",
+      "@google",
+      "gemini-cli",
+      "dist",
+      "index.js",
+    );
+    const geminiCliDir = join(versionDir, "lib", "node_modules", "@google", "gemini-cli");
+    const packageJsonPath = normalizePath(join(geminiCliDir, "package.json"));
+    const oauth2Path = join(
+      geminiCliDir,
+      "node_modules",
+      "@google",
+      "gemini-cli-core",
+      "dist",
+      "src",
+      "code_assist",
+      "oauth2.js",
+    );
+    try {
+      process.env.PATH = join(rootDir, "usr", "bin");
+      process.env.NVM_DIR = nvmDir;
+      mockExistsSync.mockImplementation((p: string) => {
+        const normalized = normalizePath(p);
+        return (
+          normalized === normalizePath(geminiPath) ||
+          normalized === packageJsonPath ||
+          normalized === normalizePath(oauth2Path)
+        );
+      });
+      mockReaddirSync.mockImplementation((p: string) => {
+        const normalized = normalizePath(p);
+        if (normalized === normalizePath(join(nvmDir, "versions", "node"))) {
+          return [dirent("v25.9.0", true)];
+        }
+        return [];
+      });
+      mockRealpathSync.mockReturnValue(resolvedPath);
+      mockReadFileSync.mockReturnValue(FAKE_OAUTH2_CONTENT);
+
+      clearCredentialsCache();
+      const result = extractGeminiCliCredentials();
+      expectFakeCliCredentials(result);
+    } finally {
+      if (originalNvmDir === undefined) {
+        delete process.env.NVM_DIR;
+      } else {
+        process.env.NVM_DIR = originalNvmDir;
+      }
+    }
   });
 
   it("returns null when oauth2.js cannot be found", async () => {

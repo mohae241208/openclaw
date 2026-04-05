@@ -6,14 +6,13 @@ import { getMediaDir } from "../../media/store.js";
 import { extractPdfContent } from "../../media/pdf-extract.js";
 import type { MsgContext } from "../templating.js";
 import type { CommandHandler, CommandHandlerResult } from "./commands-types.js";
-import { buildManualContext, listManuals, saveManual } from "./manual-store.js";
+import { listManuals, saveManual } from "./manual-store.js";
 
 const MANUAL_COMMAND = "/매뉴얼";
 const MANUAL_USAGE = [
   "⚠️ 형식 오류입니다.",
   "/매뉴얼 등록  (PDF 첨부 필요)",
   "/매뉴얼 목록",
-  "/매뉴얼 질문 질문내용",
 ].join("\n");
 
 function normalizeTokens(input: string): string[] {
@@ -141,63 +140,14 @@ async function handleManualList(): Promise<CommandHandlerResult> {
   return { shouldContinue: false, reply: { text: lines.join("\n") } };
 }
 
-function applyManualQuestionContext(params: {
-  ctx: MsgContext;
-  rootCtx?: MsgContext;
-  question: string;
-  context: string;
-}) {
-  const rewritten = [
-    'Use the "manual-qa" skill for this request.',
-    params.context,
-    "## User question",
-    params.question,
-  ].join("\n\n");
-  params.ctx.Body = rewritten;
-  params.ctx.BodyForAgent = rewritten;
-  (params.ctx as Record<string, unknown>).BodyStripped = rewritten;
-  params.ctx.CommandBody = params.question;
-  params.ctx.BodyForCommands = params.question;
-  params.ctx.RawBody = params.question;
-  if (params.rootCtx && params.rootCtx !== params.ctx) {
-    params.rootCtx.Body = rewritten;
-    params.rootCtx.BodyForAgent = rewritten;
-    (params.rootCtx as Record<string, unknown>).BodyStripped = rewritten;
-    params.rootCtx.CommandBody = params.question;
-    params.rootCtx.BodyForCommands = params.question;
-    params.rootCtx.RawBody = params.question;
-  }
-}
-
-async function handleManualQuestion(
-  params: Parameters<CommandHandler>[0],
-  question: string,
-): Promise<CommandHandlerResult> {
-  const context = await buildManualContext({ question });
-  if (!context) {
-    return {
-      shouldContinue: false,
-      reply: {
-        text: "⚠️ 매뉴얼 데이터가 없어서 질문에 사용할 컨텍스트를 만들 수 없습니다. 먼저 `/매뉴얼 등록`을 사용해 주세요.",
-      },
-    };
-  }
-  applyManualQuestionContext({
-    ctx: params.ctx,
-    rootCtx: params.rootCtx,
-    question,
-    context,
-  });
-  return { shouldContinue: true };
-}
-
 export const handleManualCommands: CommandHandler = async (params, allowTextCommands) => {
   if (!allowTextCommands) {
     return null;
   }
   const normalized = params.command.commandBodyNormalized.trim();
+  const attachment = await findPdfAttachment(params.ctx);
   if (!params.command.isAuthorizedSender) {
-    if (!normalized && (await findPdfAttachment(params.ctx))) {
+    if (!normalized && attachment) {
       logVerbose(
         `Ignoring automatic manual ingest from unauthorized sender: ${params.command.senderId || "<unknown>"}`,
       );
@@ -211,12 +161,11 @@ export const handleManualCommands: CommandHandler = async (params, allowTextComm
     );
     return { shouldContinue: false };
   }
-  if (!normalized) {
-    const attachment = await findPdfAttachment(params.ctx);
-    if (!attachment) {
-      return null;
-    }
+  if (attachment && !normalized.startsWith("/")) {
     return await handleManualRegister(params);
+  }
+  if (!normalized) {
+    return null;
   }
   if (normalized !== MANUAL_COMMAND && !normalized.startsWith(`${MANUAL_COMMAND} `)) {
     return null;
@@ -232,7 +181,6 @@ export const handleManualCommands: CommandHandler = async (params, allowTextComm
           "📘 매뉴얼 기능",
           "/매뉴얼 등록 (PDF 첨부)",
           "/매뉴얼 목록",
-          "/매뉴얼 질문 질문내용",
         ].join("\n"),
       },
     };
@@ -244,13 +192,6 @@ export const handleManualCommands: CommandHandler = async (params, allowTextComm
   }
   if (action === "목록") {
     return await handleManualList();
-  }
-  if (action === "질문") {
-    const question = rest.slice("질문".length).trim();
-    if (!question) {
-      return { shouldContinue: false, reply: { text: MANUAL_USAGE } };
-    }
-    return await handleManualQuestion(params, question);
   }
   return { shouldContinue: false, reply: { text: MANUAL_USAGE } };
 };

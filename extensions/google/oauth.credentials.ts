@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import type { Dirent } from "node:fs";
+import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { CLIENT_ID_KEYS, CLIENT_SECRET_KEYS } from "./oauth.shared.js";
 
@@ -48,7 +49,7 @@ export function extractGeminiCliCredentials(): { clientId: string; clientSecret:
   }
 
   try {
-    const geminiPath = findInPath("gemini");
+    const geminiPath = findFirstInPath(["gemini", "gemini-cli"]);
     if (!geminiPath) {
       return null;
     }
@@ -117,14 +118,84 @@ function looksLikeGeminiCliDir(candidate: string): boolean {
   );
 }
 
+function resolveNvmBinDirs(): string[] {
+  const home = homedir();
+  const nvmRoots = [
+    process.env.NVM_DIR?.trim(),
+    home ? join(home, ".nvm") : "",
+  ].filter(Boolean) as string[];
+  const bins: string[] = [];
+  const pushVersionBins = (versionsRoot: string) => {
+    try {
+      for (const entry of credentialFs.readdirSync(versionsRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory()) {
+          continue;
+        }
+        bins.push(join(versionsRoot, entry.name, "bin"));
+      }
+    } catch {
+      // ignore inaccessible nvm roots
+    }
+  };
+
+  for (const root of nvmRoots) {
+    pushVersionBins(root);
+    pushVersionBins(join(root, "versions", "node"));
+  }
+  return bins;
+}
+
+function resolveBinarySearchDirs(): string[] {
+  const fromPath = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+  const home = homedir();
+  const envDirs = [
+    process.env.OPENCLAW_GEMINI_CLI_BIN?.trim(),
+    process.env.PNPM_HOME?.trim(),
+    process.env.npm_config_prefix?.trim() ? join(process.env.npm_config_prefix.trim(), "bin") : "",
+    process.env.NPM_CONFIG_PREFIX?.trim() ? join(process.env.NPM_CONFIG_PREFIX.trim(), "bin") : "",
+    process.env.VOLTA_HOME?.trim() ? join(process.env.VOLTA_HOME.trim(), "bin") : "",
+    process.env.NVM_BIN?.trim(),
+    process.env.HOMEBREW_PREFIX?.trim() ? join(process.env.HOMEBREW_PREFIX.trim(), "bin") : "",
+    home ? join(home, ".npm-global", "bin") : "",
+    home ? join(home, ".local", "bin") : "",
+    ...resolveNvmBinDirs(),
+  ].filter(Boolean) as string[];
+  const commonDirs =
+    process.platform === "win32"
+      ? []
+      : ["/usr/local/bin", "/opt/homebrew/bin", "/home/linuxbrew/.linuxbrew/bin"];
+
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+  for (const dir of [...fromPath, ...envDirs, ...commonDirs]) {
+    const normalized = process.platform === "win32" ? dir.replace(/\\/g, "/").toLowerCase() : dir;
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    deduped.push(dir);
+  }
+  return deduped;
+}
+
 function findInPath(name: string): string | null {
   const exts = process.platform === "win32" ? [".cmd", ".bat", ".exe", ""] : [""];
-  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+  for (const dir of resolveBinarySearchDirs()) {
     for (const ext of exts) {
       const path = join(dir, name + ext);
       if (credentialFs.existsSync(path)) {
         return path;
       }
+    }
+  }
+  return null;
+}
+
+function findFirstInPath(names: string[]): string | null {
+  for (const name of names) {
+    const found = findInPath(name);
+    if (found) {
+      return found;
     }
   }
   return null;
